@@ -1,0 +1,10 @@
+{
+  "id": "omnifocus-dataview",
+  "name": "OmniFocus Dataview",
+  "version": "1.0.0",
+  "minAppVersion": "0.12.0",
+  "description": "Embed OmniFocus tasks in Obsidian using code blocks.",
+  "author": "Your Name",
+  "authorUrl": "https://yourwebsite.com",
+  "isDesktopOnly": true
+}
