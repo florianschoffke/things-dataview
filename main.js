@@ -20,6 +20,11 @@ module.exports = class ThingsPlugin extends Plugin {
         // Clear previous content
         el.empty();
 
+        if (tasks.length === 0) {
+            el.createEl('p', { text: 'No tasks found.' });
+            return;
+        }
+
         // Create a table element
         const tableEl = el.createEl('table');
         const headerRow = tableEl.createEl('tr');
@@ -72,54 +77,89 @@ module.exports = class ThingsPlugin extends Plugin {
 
         const tags = config.tags ? escapeString(config.tags) : '';
         const project = config.project ? escapeString(config.project) : '';
+        const area = config.area ? escapeString(config.area) : '';
 
         // Build the JXA script with the working code
         let script = `
-(() => {
-    const Things = Application('Things3');
-    let tasks = [];
-    const config = {
-        tags: '${tags}',
-        project: '${project}'
-    };
+    (() => {
+        const Things = Application('Things3');
+        let tasks = [];
+        const config = {
+            tags: '${tags}',
+            project: '${project}',
+            area: '${area}'
+        };
 
-    if (config.project && config.tags) {
-        const projectName = config.project;
-        const tagNames = config.tags.split(',').map(tag => tag.trim());
-        const projects = Things.projects.whose({ name: projectName })();
-        if (projects.length > 0) {
-            const projectTasks = projects[0].toDos();
-            tasks = projectTasks.filter(task => {
+        // Function to get tasks from an area
+        function getAreaTasks(areaName) {
+            const areas = Things.areas().filter(area => area.name() === areaName);
+            if (areas.length === 0) {
+                console.log('Area not found:', areaName);
+                return [];
+            }
+            const area = areas[0];
+
+            // Get tasks directly in the area
+            let areaTasks = Things.toDos().filter(todo => {
+                return todo.area() && todo.area().id() === area.id();
+            });
+
+            // Get projects in the area
+            const projectsInArea = Things.projects().filter(project => {
+                return project.area() && project.area().id() === area.id();
+            });
+
+            // Get tasks from projects within the area
+            let projectTasks = [];
+            projectsInArea.forEach(project => {
+                projectTasks = projectTasks.concat(project.toDos());
+            });
+
+            // Combine all tasks
+            return areaTasks.concat(projectTasks);
+        }
+
+        if (config.area) {
+            let areaTasks = getAreaTasks(config.area);
+            tasks = areaTasks;
+
+            if (config.tags) {
+                const tagNames = config.tags.split(',').map(tag => tag.trim());
+                tasks = tasks.filter(task => {
+                    const taskTags = task.tagNames();
+                    return tagNames.some(tag => taskTags.includes(tag));
+                });
+            }
+        } else if (config.project) {
+            const projectName = config.project;
+            const projects = Things.projects().filter(project => project.name() === projectName);
+            if (projects.length > 0) {
+                tasks = projects[0].toDos();
+                if (config.tags) {
+                    const tagNames = config.tags.split(',').map(tag => tag.trim());
+                    tasks = tasks.filter(task => {
+                        const taskTags = task.tagNames();
+                        return tagNames.some(tag => taskTags.includes(tag));
+                    });
+                }
+            } else {
+                console.log('Project not found:', projectName);
+                return 'Project not found: ' + projectName;
+            }
+        } else if (config.tags) {
+            const tagNames = config.tags.split(',').map(tag => tag.trim());
+            tasks = Things.toDos().filter(task => {
                 const taskTags = task.tagNames();
                 return tagNames.some(tag => taskTags.includes(tag));
             });
         } else {
-            console.log('Project not found:', projectName);
-            return 'Project not found: ' + projectName;
+            // If no criteria are specified, retrieve all tasks
+            tasks = Things.toDos();
         }
-    } else if (config.project) {
-        const projectName = config.project;
-        const projects = Things.projects.whose({ name: projectName })();
-        if (projects.length > 0) {
-            tasks = projects[0].toDos();
-        } else {
-            console.log('Project not found:', projectName);
-            return 'Project not found: ' + projectName;
-        }
-    } else if (config.tags) {
-        const tagNames = config.tags.split(',').map(tag => tag.trim());
-        tasks = Things.toDos().filter(task => {
-            const taskTags = task.tagNames();
-            return tagNames.some(tag => taskTags.includes(tag));
-        });
-    } else {
-        // If neither tags nor project are specified, retrieve all tasks
-        tasks = Things.toDos();
-    }
 
-    // Return the tasks with their id and name
-    return JSON.stringify(tasks.map(task => ({ id: task.id(), name: task.name() })));
-})();
+        // Return the tasks with their id and name
+        return JSON.stringify(tasks.map(task => ({ id: task.id(), name: task.name() })));
+    })();
         `;
 
         try {
