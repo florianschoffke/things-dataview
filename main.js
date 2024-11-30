@@ -1,46 +1,21 @@
 const { Plugin } = require('obsidian');
-const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
-class OmniFocusDataviewPlugin extends Plugin {
-    onload() {
-        console.log('Loading OmniFocus Dataview Plugin');
-
-        this.registerMarkdownCodeBlockProcessor('search-omni', this.processOmniBlock.bind(this));
+module.exports = class ThingsPlugin extends Plugin {
+    async onload() {
+        this.registerMarkdownCodeBlockProcessor('things', async (source, el, ctx) => {
+            await this.processThingsBlock(source, el);
+        });
     }
 
-    async processOmniBlock(source, el, ctx) {
-        const lines = source.split('\n');
-        let projectName = null;
-        let folderName = null;
-        let tagName = null;
+    async processThingsBlock(source, el) {
+        // Parse the code block
+        const config = this.parseConfig(source);
 
-        // Parse the project, folder, or tag from the code block
-        for (const line of lines) {
-            const projectMatch = line.match(/^project:\s*(.+)$/);
-            const folderMatch = line.match(/^list-projects:\s*(.+)$/);
-            const tagMatch = line.match(/^tag:\s*(.+)$/);
-            if (projectMatch) {
-                projectName = projectMatch[1].trim();
-                break;
-            }
-            if (folderMatch) {
-                folderName = folderMatch[1].trim();
-                break;
-            }
-            if (tagMatch) {
-                tagName = tagMatch[1].trim();
-                break;
-            }
-        }
-
-        let tasks = [];
-        if (projectName) {
-            tasks = this.fetchTasksFromProject(projectName);
-        } else if (folderName) {
-            tasks = this.listProjectsInFolder(folderName);
-        } else if (tagName) {
-            tasks = this.fetchTasksWithTag(tagName);
-        }
+        // Retrieve tasks using JXA
+        const tasks = await this.retrieveTasks(config);
 
         // Clear previous content
         el.empty();
@@ -53,7 +28,7 @@ class OmniFocusDataviewPlugin extends Plugin {
         tasks.forEach(task => {
             const row = tableEl.createEl('tr');
             const summaryCell = row.createEl('td');
-            const taskLink = `omnifocus:///task/${task.id}`;
+            const taskLink = `things:///show?id=${task.id}`;
             const linkEl = summaryCell.createEl('a', { text: task.name, href: taskLink });
             linkEl.style.textDecoration = 'none';
             linkEl.style.color = 'inherit';
@@ -66,86 +41,135 @@ class OmniFocusDataviewPlugin extends Plugin {
         reloadButton.style.cursor = 'pointer';
         reloadButton.style.float = 'right';
         reloadButton.style.fontSize = '1.2em';
-        reloadButton.onclick = () => {
-            this.processOmniBlock(source, el, ctx);
+        reloadButton.onclick = async () => {
+            await this.processThingsBlock(source, el);
         };
         el.prepend(reloadButton);
     }
 
-    fetchTasksFromProject(projectName) {
-        try {
-            // JavaScript for Automation (JXA) script to fetch projects
-            const jxaScript = `
-                const allProjects = Application('OmniFocus').defaultDocument.flattenedProjects();
-                const project = allProjects.find(p => p.name() === '${projectName}');
-                if (!project) throw new Error('Project not found');
-                const tasks = project.tasks().map(task => ({
-                    name: task.name(),
-                    id: task.id()  // Add task ID for linking
-                }));
-                JSON.stringify(tasks);
-            `;
+    parseConfig(source) {
+        const lines = source.split('\n');
+        const config = {};
+        lines.forEach(line => {
+            const [key, value] = line.split(':').map(part => part.trim());
+            if (key && value) {
+                config[key] = value;
+            }
+        });
+        return config;
+    }
 
-            console.log(`Executing script for project: ${projectName}`);
-            const result = execSync(`osascript -l JavaScript -e "${jxaScript}"`, { encoding: 'utf8' });
+    async retrieveTasks(config) {
+        // Helper function to escape strings for JavaScript
+        function escapeString(str) {
+            return str
+                .replace(/\\/g, '\\\\')   // Escape backslashes
+                .replace(/"/g, '\\"')     // Escape double quotes
+                .replace(/'/g, "\\'")     // Escape single quotes
+                .replace(/\n/g, '\\n')    // Escape newlines
+                .replace(/\r/g, '\\r');   // Escape carriage returns
+        }
+
+        const tags = config.tags ? escapeString(config.tags) : '';
+        const project = config.project ? escapeString(config.project) : '';
+
+        // Build the JXA script with the working code
+        let script = `
+(() => {
+    const Things = Application('Things3');
+    let tasks = [];
+    const config = {
+        tags: '${tags}',
+        project: '${project}'
+    };
+
+    if (config.project && config.tags) {
+        const projectName = config.project;
+        const tagNames = config.tags.split(',').map(tag => tag.trim());
+        const projects = Things.projects.whose({ name: projectName })();
+        if (projects.length > 0) {
+            const projectTasks = projects[0].toDos();
+            tasks = projectTasks.filter(task => {
+                const taskTags = task.tagNames();
+                return tagNames.some(tag => taskTags.includes(tag));
+            });
+        } else {
+            console.log('Project not found:', projectName);
+            return 'Project not found: ' + projectName;
+        }
+    } else if (config.project) {
+        const projectName = config.project;
+        const projects = Things.projects.whose({ name: projectName })();
+        if (projects.length > 0) {
+            tasks = projects[0].toDos();
+        } else {
+            console.log('Project not found:', projectName);
+            return 'Project not found: ' + projectName;
+        }
+    } else if (config.tags) {
+        const tagNames = config.tags.split(',').map(tag => tag.trim());
+        tasks = Things.toDos().filter(task => {
+            const taskTags = task.tagNames();
+            return tagNames.some(tag => taskTags.includes(tag));
+        });
+    } else {
+        // If neither tags nor project are specified, retrieve all tasks
+        tasks = Things.toDos();
+    }
+
+    // Return the tasks with their id and name
+    return JSON.stringify(tasks.map(task => ({ id: task.id(), name: task.name() })));
+})();
+        `;
+
+        try {
+            const result = await this.executeJXA(script);
+
+            // Log the raw output for debugging purposes
+            console.log('Raw JXA Output:', result);
+
             return JSON.parse(result);
         } catch (error) {
-            console.error('Error fetching tasks from OmniFocus:', error);
+            console.error('Failed to retrieve tasks:', error);
             return [];
         }
     }
 
-    listProjectsInFolder(folderName) {
-        try {
-            // JavaScript for Automation (JXA) script to list projects in a folder
-            const jxaScript = `
-                const app = Application('OmniFocus');
-                const doc = app.defaultDocument;
-                const folder = doc.flattenedFolders.byName('${folderName}');
-                if (!folder) throw new Error('Folder not found');
-                const projects = folder.projects().map(project => ({
-                    name: project.name(),
-                    id: project.id()  // Add project ID for linking
-                }));
-                JSON.stringify(projects);
-            `;
+    executeJXA(script) {
+        return new Promise((resolve, reject) => {
+            const { exec } = require('child_process');
 
-            console.log(`Executing script for folder: ${folderName}`);
-            const result = execSync(`osascript -l JavaScript -e "${jxaScript}"`, { encoding: 'utf8' });
-            return JSON.parse(result);
-        } catch (error) {
-            console.error('Error listing projects from OmniFocus:', error);
-            return [];
-        }
+            // Create a temporary file for the script
+            const tmpDir = os.tmpdir();
+            const tmpFile = path.join(tmpDir, `obsidian-things-script-${Date.now()}.js`);
+
+            // Write the script to the temporary file
+            fs.writeFile(tmpFile, script, (writeErr) => {
+                if (writeErr) {
+                    reject(writeErr);
+                    return;
+                }
+
+                const command = `osascript -l JavaScript "${tmpFile}"`;
+
+                // Log the command for debugging
+                console.log('Executing command:', command);
+
+                exec(command, (error, stdout, stderr) => {
+                    // Clean up the temporary file
+                    fs.unlink(tmpFile, (unlinkErr) => {
+                        if (unlinkErr) {
+                            console.error('Failed to delete temp file:', unlinkErr);
+                        }
+                    });
+
+                    if (error) {
+                        reject(stderr);
+                    } else {
+                        resolve(stdout.trim());
+                    }
+                });
+            });
+        });
     }
-
-    fetchTasksWithTag(tagName) {
-        try {
-            // JavaScript for Automation (JXA) script to fetch tasks with a tag
-            const jxaScript = `
-                const app = Application('OmniFocus');
-                const doc = app.defaultDocument;
-                const tag = doc.flattenedTags.byName('${tagName}');
-                if (!tag) throw new Error('Tag not found');
-                const tasks = tag.tasks().map(task => ({
-                    name: task.name(),
-                    id: task.id()  // Add task ID for linking
-                }));
-                JSON.stringify(tasks);
-            `;
-
-            console.log(`Executing script for tag: ${tagName}`);
-            const result = execSync(`osascript -l JavaScript -e "${jxaScript}"`, { encoding: 'utf8' });
-            return JSON.parse(result);
-        } catch (error) {
-            console.error('Error fetching tasks from OmniFocus:', error);
-            return [];
-        }
-    }
-
-    onunload() {
-        console.log('Unloading OmniFocus Dataview Plugin');
-    }
-}
-
-module.exports = OmniFocusDataviewPlugin;
+};
