@@ -167,9 +167,12 @@ module.exports = class ThingsPlugin extends Plugin {
     executeJXA(script) {
         return new Promise((resolve, reject) => {
             const { exec } = require('child_process');
+            const crypto = require('crypto');
 
             const tmpDir = os.tmpdir();
-            const tmpFile = path.join(tmpDir, `obsidian-things-script-${Date.now()}.js`);
+            // Generate a unique filename using random bytes
+            const uniqueSuffix = Date.now() + '-' + crypto.randomBytes(6).toString('hex');
+            const tmpFile = path.join(tmpDir, `obsidian-things-script-${uniqueSuffix}.js`);
 
             fs.writeFile(tmpFile, script, (writeErr) => {
                 if (writeErr) {
